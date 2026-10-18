@@ -4,6 +4,6 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci
 COPY . .
-RUN npx prisma generate && sed -i 's/$//' docker-entrypoint.sh && chmod +x docker-entrypoint.sh
+RUN npx prisma generate && tr -d '\015' < docker-entrypoint.sh > entry.tmp && mv entry.tmp docker-entrypoint.sh && chmod +x docker-entrypoint.sh
 EXPOSE 4000
 CMD ["./docker-entrypoint.sh"]
