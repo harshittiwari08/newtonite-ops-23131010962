@@ -5,6 +5,7 @@ import {
   PRIORITIES,
   STATUSES,
   type Activity,
+  type Comment,
   type ItemDetail as Detail,
   type Priority,
   type Status,
@@ -49,11 +50,18 @@ export default function ItemDetail({ user, users, itemId, onClose, onChanged }: 
   const [draft, setDraft] = useState({ title: '', description: '', priority: 'MEDIUM' as Priority, assigneeId: '', resolutionNote: '' })
   const [comment, setComment] = useState('')
   const [raceLog, setRaceLog] = useState<string | null>(null)
+  const [remoteVersion, setRemoteVersion] = useState<number | null>(null)
+  // Older history is paged in on demand; `null` cursor + loaded=false means "still showing the preview".
+  const [history, setHistory] = useState<{ activities: Activity[] | null; comments: Comment[] | null }>({ activities: null, comments: null })
+  const [cursors, setCursors] = useState<{ activities: string | null; comments: string | null }>({ activities: null, comments: null })
 
   const load = useCallback(async () => {
     const r = await call<Detail & { error?: string }>(`/items/${itemId}`, { userId: user.id })
     if (r.ok) {
       setItem(r.data)
+      setRemoteVersion(null)
+      setHistory({ activities: null, comments: null })
+      setCursors({ activities: null, comments: null })
       setLoadError(null)
       setNote(r.data.resolutionNote ?? '')
     } else {
@@ -70,6 +78,27 @@ export default function ItemDetail({ user, users, itemId, onClose, onChanged }: 
     setEditing(false)
     load()
   }, [load])
+
+  // Light polling: tell the user if someone else changed the item, without overwriting their form.
+  useEffect(() => {
+    const t = setInterval(async () => {
+      const r = await call<Detail>(`/items/${itemId}`, { userId: user.id })
+      if (r.ok) setRemoteVersion(r.data.version)
+    }, 8000)
+    return () => clearInterval(t)
+  }, [itemId, user.id])
+
+  async function loadMore(kind: 'activities' | 'comments') {
+    const shown = history[kind] ?? item![kind]
+    const cursor = history[kind] ? cursors[kind] : null
+    const r = await call<{ items: any[]; nextCursor: string | null }>(
+      `/items/${itemId}/${kind}?limit=50${cursor ? `&cursor=${cursor}` : ''}`,
+      { userId: user.id },
+    )
+    if (!r.ok) return
+    setHistory((h) => ({ ...h, [kind]: history[kind] ? [...shown, ...r.data.items] : r.data.items }))
+    setCursors((c) => ({ ...c, [kind]: r.data.nextCursor }))
+  }
 
   /** Shared handling for mutating calls: 409 -> conflict banner, other errors -> notice. */
   async function mutate(path: string, method: string, body: unknown, okText: string) {
@@ -108,6 +137,10 @@ export default function ItemDetail({ user, users, itemId, onClose, onChanged }: 
   }
   if (!item) return <aside className="panel">Loading...</aside>
 
+  const activities = history.activities ?? item.activities
+  const comments = history.comments ?? item.comments
+  const moreActivities = history.activities ? cursors.activities !== null : item.activities.length < item._count.activities
+  const moreComments = history.comments ? cursors.comments !== null : item.comments.length < item._count.comments
   const writable = canAct(item.currentUserRole)
   const isLead = item.currentUserRole === 'LEAD' || item.currentUserRole === 'ADMIN'
   const teamMembers = users.filter((u) => u.memberships.some((m) => m.teamId === item.teamId && m.role !== 'VIEWER'))
@@ -195,6 +228,12 @@ export default function ItemDetail({ user, users, itemId, onClose, onChanged }: 
               Reload latest
             </button>
           </div>
+        </div>
+      )}
+      {remoteVersion !== null && remoteVersion !== item.version && !conflict && (
+        <div className="banner conflict">
+          Someone else changed this item (now v{remoteVersion}, you are viewing v{item.version}).{' '}
+          <button onClick={reloadLatest}>Reload latest</button>
         </div>
       )}
       {notice && <div className={`banner ${notice.kind}`}>{notice.text}</div>}
@@ -313,13 +352,14 @@ export default function ItemDetail({ user, users, itemId, onClose, onChanged }: 
       )}
 
       <section>
-        <h4>Comments ({item.comments.length})</h4>
-        {item.comments.map((c) => (
+        <h4>Comments ({item._count.comments})</h4>
+        {comments.map((c) => (
           <div key={c.id} className="comment">
             <strong>{c.author.name}</strong> <span className="muted small">{new Date(c.createdAt).toLocaleString()}</span>
             <div>{c.body}</div>
           </div>
         ))}
+        {moreComments && <button onClick={() => loadMore('comments')}>Load older comments</button>}
         {writable && (
           <div className="row">
             <input placeholder="Add a comment" value={comment} onChange={(e) => setComment(e.target.value)} />
@@ -329,9 +369,9 @@ export default function ItemDetail({ user, users, itemId, onClose, onChanged }: 
       </section>
 
       <section>
-        <h4>Activity history ({item.activities.length})</h4>
+        <h4>Activity history ({item._count.activities})</h4>
         <ol className="timeline">
-          {item.activities.map((a) => (
+          {activities.map((a) => (
             <li key={a.id}>
               <strong>{a.action}</strong> by {a.actor.name}{' '}
               <span className="muted small">{new Date(a.createdAt).toLocaleString()}</span>
@@ -339,6 +379,7 @@ export default function ItemDetail({ user, users, itemId, onClose, onChanged }: 
             </li>
           ))}
         </ol>
+        {moreActivities && <button onClick={() => loadMore('activities')}>Load older activity</button>}
       </section>
     </aside>
   )

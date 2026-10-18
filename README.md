@@ -93,14 +93,35 @@ React SPA  --x-user-id header-->  Express API  -->  Prisma  -->  PostgreSQL
 
 All routes except `/api/users` and `/api/login` need the `x-user-id` header.
 
+## Assumptions
+
+- Work items belong to exactly one team; visibility and actions are decided by the caller's role in that team.
+- A MEMBER can claim, edit, comment and move items; only a LEAD/ADMIN may assign items to other people and approve `AWAITING_APPROVAL -> RESOLVED`.
+- "Urgent" means HIGH or CRITICAL priority. Resolved/closed items do not count as "active".
+- Activity history is append-only; items are never hard-deleted.
+- Repeating a request is safe: a repeated create (same `Idempotency-Key`) or a repeated claim by the current owner returns the original success instead of an error.
+
+## Scale notes
+
+The detail view returns only the newest 20 activities/comments plus totals; older history is fetched with cursor pagination (`GET /api/items/:id/activities` and `/comments`, `limit`, `cursor`), so a long-lived item does not produce a huge response.
+
+## If the app grew significantly / next week
+
+1. Real auth (sessions/JWT, hashed passwords) and team-scoped `/api/jobs`.
+2. Replace polling with SSE/WebSocket pushes for item changes; add optimistic UI with rollback on `409`.
+3. Keyset pagination and `pg_trgm`/full-text search for the item list; partition or archive old `ActivityEvent` rows.
+4. Dedicated queue/worker process (`SKIP LOCKED` or a broker), idempotent handlers, dead-letter view.
+5. Idempotency-key expiry, global error middleware, structured logging and metrics.
+
 ## Known limitations
 
 - **Authentication is a demo.** Identity is the `x-user-id` header and passwords are stored in plain text. This is intentional for evaluator convenience and must be replaced by sessions/JWT and password hashing in production. Authorization checks themselves are real and server-side.
 - **`/api/jobs` is not team-scoped**; any signed-in user can see job payloads (which include emails).
-- **Job worker runs in the API process** and polls with `setInterval`. With several API instances, two workers could pick up the same job; a real deployment should claim jobs with `SELECT ... FOR UPDATE SKIP LOCKED` or use a dedicated queue. Jobs here only log; there is no real notification delivery. Backoff is linear (`attempt * 5s`), not exponential.
+- **Job worker runs in the API process** and polls with `setInterval`. Jobs are leased with a compare-and-swap on `runAt` (30s lease), so overlapping workers do not process a job twice at once, but delivery is still **at-least-once** (a crash mid-job means it runs again after the lease expires). Jobs here only log; there is no real notification delivery, and a dedicated queue / `SKIP LOCKED` would be the next step at scale.
 - **Idempotency keys never expire** and the stored response is the one from first creation (it is not refreshed if the item later changes).
 - **Search uses `ILIKE '%q%'`**, which does not use the indexes; at much larger scale it should move to `pg_trgm` or full-text search.
-- **Pagination is offset-based**, so deep pages get slower and can shift if items change while browsing.
+- **List pagination is offset-based**, so deep pages get slower and can shift if items change while browsing.
+- **Stale views** are detected by an 8-second poll of the open item (banner, no overwrite of in-progress edits), not by push (SSE/WebSocket). The UI is pessimistic: it waits for the server's decision rather than updating optimistically.
 - Async Express 4 handlers have no global error middleware; an unexpected database error can leave a request hanging instead of returning `500`.
 - The frontend has no automated tests, and the claim route checks the item before its transaction (the atomic `WHERE assigneeId IS NULL` is what guarantees correctness).
 - A user who holds ADMIN in any team is treated as an admin everywhere (the seeded admin is a member of all three teams).

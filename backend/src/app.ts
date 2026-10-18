@@ -12,6 +12,9 @@ app.use(cors());
 app.use(express.json());
 
 // Valid state machine transitions
+// Detail view only returns the newest N history rows; the rest is paged via /activities and /comments.
+const HISTORY_PREVIEW = 20;
+
 const ALLOWED_TRANSITIONS: Record<WorkItemStatus, WorkItemStatus[]> = {
     OPEN: [WorkItemStatus.IN_PROGRESS],
     IN_PROGRESS: [WorkItemStatus.OPEN, WorkItemStatus.AWAITING_APPROVAL, WorkItemStatus.RESOLVED],
@@ -190,12 +193,15 @@ app.get('/api/items/:id', requireAuth, async (req, res) => {
             createdBy: { select: { id: true, name: true, email: true } },
             activities: {
                 include: { actor: { select: { id: true, name: true, email: true } } },
-                orderBy: { createdAt: 'desc' },
+                orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+                take: HISTORY_PREVIEW,
             },
             comments: {
                 include: { author: { select: { id: true, name: true, email: true } } },
-                orderBy: { createdAt: 'asc' },
+                orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+                take: HISTORY_PREVIEW,
             },
+            _count: { select: { activities: true, comments: true } },
         },
     });
 
@@ -210,6 +216,33 @@ app.get('/api/items/:id', requireAuth, async (req, res) => {
 
     res.json({ ...item, currentUserRole: role });
 });
+
+// 5b. Cursor-paginated history (activities / comments), newest first.
+for (const kind of ['activities', 'comments'] as const) {
+    app.get(`/api/items/:id/${kind}`, requireAuth, async (req, res) => {
+        const user = req.user!;
+        const item = await prisma.workItem.findUnique({ where: { id: req.params.id }, select: { teamId: true } });
+        if (!item) return res.status(404).json({ error: 'Work item not found.' });
+        if (!getRoleInTeam(user, item.teamId)) {
+            return res.status(403).json({ error: 'Forbidden: You do not belong to the owning team.' });
+        }
+        const limit = Math.min(100, Math.max(1, parseInt((req.query.limit as string) || '20', 10)));
+        const cursor = req.query.cursor as string | undefined;
+        const args = {
+            where: { workItemId: req.params.id },
+            orderBy: [{ createdAt: 'desc' as const }, { id: 'desc' as const }],
+            take: limit + 1,
+            ...(cursor ? { cursor: { id: cursor }, skip: 0 } : {}),
+        };
+        const rows: any[] =
+            kind === 'activities'
+                ? await prisma.activityEvent.findMany({ ...args, include: { actor: { select: { id: true, name: true, email: true } } } })
+                : await prisma.comment.findMany({ ...args, include: { author: { select: { id: true, name: true, email: true } } } });
+        const hasMore = rows.length > limit;
+        const page = hasMore ? rows.slice(0, limit) : rows;
+        res.json({ items: page, nextCursor: hasMore ? rows[limit].id : null });
+    });
+}
 
 // 6. Create Work Item (with Idempotency-Key protection!)
 app.post('/api/items', requireAuth, async (req, res) => {
@@ -319,6 +352,19 @@ app.post('/api/items/:id/claim', requireAuth, async (req, res) => {
 
     if (!hasMinRole(user, item.teamId, Role.MEMBER)) {
         return res.status(403).json({ error: 'Forbidden: Only team members (MEMBER+) can claim items.' });
+    }
+
+    // Retry-safe: the current owner repeating their claim gets the same success, not a conflict.
+    if (item.assigneeId === user.id) {
+        const mine = await prisma.workItem.findUnique({
+            where: { id: itemId },
+            include: {
+                team: true,
+                assignee: { select: { id: true, name: true, email: true } },
+                createdBy: { select: { id: true, name: true, email: true } },
+            },
+        });
+        return res.set('X-Idempotent-Replay', 'true').json(mine);
     }
 
     const updated = await prisma.$transaction(async (tx) => {

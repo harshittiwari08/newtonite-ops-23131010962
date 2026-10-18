@@ -11,7 +11,7 @@ Five decisions that shaped the system, with the alternatives I weighed and what 
 2. Pessimistic row lock (`SELECT ... FOR UPDATE`) inside a transaction.
 3. A single `UPDATE ... WHERE id = ? AND assigneeId IS NULL` and look at the affected row count.
 
-**Decision.** Option 3 (`updateMany` with `assigneeId: null` in the filter). The database serialises the two updates; exactly one affects a row. The loser gets `409` plus the current item so the UI can say who won.
+**Decision.** Option 3 (`updateMany` with `assigneeId: null` in the filter). The database serialises the two updates; exactly one affects a row. The loser gets `409` plus the current item so the UI can say who won. If the caller is already the owner (a retry after a lost response), the route returns `200` without writing again.
 
 **Trade-offs.** No lock handling or deadlock risk, and one round trip. The cost is that the rule lives in the query shape, so any future claim-like path must reuse the same pattern; the pre-check for existence and role is a separate read that can be slightly stale but never affects correctness.
 
@@ -64,9 +64,9 @@ Five decisions that shaped the system, with the alternatives I weighed and what 
 2. Database triggers for auditing, publish to a message broker for jobs.
 3. Write the `ActivityEvent` and a `Job` row in the same `prisma.$transaction` as the change; a worker polls the table.
 
-**Decision.** Option 3. The audit row stores before/after JSON, and the job row is the outbox. The worker polls every 3 seconds, retries failures up to `maxAttempts` with a growing delay, and marks exhausted jobs `FAILED`. A *Jobs* drawer exposes the queue for demos.
+**Decision.** Option 3. The audit row stores before/after JSON, and the job row is the outbox. The worker polls every 3 seconds. Before running a job it takes a lease with a compare-and-swap on `runAt`, so overlapping pollers cannot run the same job at once; failures retry up to `maxAttempts` with exponential backoff (5s, 10s, 20s) and exhausted jobs are marked `FAILED`. A crash mid-job lets the lease expire and the job runs again. A *Jobs* drawer exposes the queue for demos.
 
-**Trade-offs.** No new infrastructure (no broker), atomicity for free, and the data is queryable. Polling adds up to 3 seconds of latency, and a single in-process worker does not scale horizontally without `FOR UPDATE SKIP LOCKED`; jobs must be idempotent because delivery is at-least-once. Audit JSON is stored as text rather than `jsonb` for simplicity, which limits querying inside it.
+**Trade-offs.** No new infrastructure (no broker), atomicity for free, and the data is queryable. Polling adds up to 3 seconds of latency, and delivery is at-least-once, so handlers must be idempotent, and the lease approach is a stopgap before a real queue or `FOR UPDATE SKIP LOCKED`. Audit JSON is stored as text rather than `jsonb` for simplicity, which limits querying inside it.
 
 ## Also worth noting
 

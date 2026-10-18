@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import request from 'supertest';
 import { app } from '../src/app';
+import { prisma } from '../src/auth';
+import { backoffMs, processPendingJobs } from '../src/worker';
 
 // These are integration tests: they run against the real database in DATABASE_URL
 // and rely on the seeded demo users. Each test creates its own work items.
@@ -120,5 +122,67 @@ describe('team authorization', () => {
         expect((await request(app).post(`/api/items/${item.id}/claim`).set(as(evan))).status).toBe(403);
         expect((await request(app).get(`/api/items?teamId=${engTeamId}`).set(as(evan))).status).toBe(403);
         expect((await request(app).get('/api/items')).status).toBe(401);
+    });
+});
+
+describe('retry-safe claim', () => {
+    it('returns 200 when the current owner repeats their claim, 409 for others', async () => {
+        const item = await createItem(users.alice);
+        expect((await request(app).post(`/api/items/${item.id}/claim`).set(as(users.bob))).status).toBe(200);
+        const again = await request(app).post(`/api/items/${item.id}/claim`).set(as(users.bob));
+        expect(again.status).toBe(200);
+        expect(again.body.version).toBe(item.version + 1); // no second write happened
+        expect((await request(app).post(`/api/items/${item.id}/claim`).set(as(users.charlie))).status).toBe(409);
+    });
+});
+
+describe('history pagination', () => {
+    it('caps the detail payload and pages the rest with a cursor', async () => {
+        const item = await createItem(users.alice);
+        for (let i = 0; i < 4; i++) {
+            await request(app).post(`/api/items/${item.id}/comments`).set(as(users.bob)).send({ body: `c${i}` });
+        }
+        const first = await request(app).get(`/api/items/${item.id}/comments?limit=3`).set(as(users.bob));
+        expect(first.body.items).toHaveLength(3);
+        expect(first.body.nextCursor).toBeTruthy();
+        const second = await request(app)
+            .get(`/api/items/${item.id}/comments?limit=3&cursor=${first.body.nextCursor}`)
+            .set(as(users.bob));
+        expect(second.body.items).toHaveLength(1);
+        expect(second.body.nextCursor).toBeNull();
+        const ids = [...first.body.items, ...second.body.items].map((c: any) => c.id);
+        expect(new Set(ids).size).toBe(4);
+        expect((await request(app).get(`/api/items/${item.id}/activities`).set(as(users.evan))).status).toBe(403);
+    });
+});
+
+describe('background jobs', () => {
+    it('uses exponential backoff', () => {
+        expect([1, 2, 3].map(backoffMs)).toEqual([5000, 10000, 20000]);
+    });
+
+    it('processes a job once even when workers overlap', async () => {
+        const job = await prisma.job.create({ data: { type: 'TEST_OVERLAP', payload: '{}' } });
+        await Promise.all([processPendingJobs(), processPendingJobs(), processPendingJobs()]);
+        const done = await prisma.job.findUnique({ where: { id: job.id } });
+        expect(done!.status).toBe('COMPLETED');
+        expect(done!.attempts).toBe(1);
+    });
+
+    it('retries a failing job and eventually completes it', async () => {
+        const job = await prisma.job.create({
+            data: { type: 'TEST_RETRY', payload: JSON.stringify({ simulateFailure: true }) },
+        });
+        let current = job;
+        for (let i = 0; i < 6 && current.status !== 'COMPLETED'; i++) {
+            await processPendingJobs();
+            current = (await prisma.job.findUnique({ where: { id: job.id } }))!;
+            if (current.status === 'PENDING') {
+                expect(current.runAt.getTime()).toBeGreaterThan(Date.now()); // backed off / leased
+                await prisma.job.update({ where: { id: job.id }, data: { runAt: new Date(Date.now() - 1000) } });
+            }
+        }
+        expect(current.status).toBe('COMPLETED');
+        expect(current.attempts).toBe(3);
     });
 });

@@ -42,6 +42,7 @@ export interface ItemDetail extends WorkItem {
   activities: Activity[]
   comments: Comment[]
   currentUserRole: Role
+  _count: { activities: number; comments: number }
 }
 export interface Job {
   id: string
