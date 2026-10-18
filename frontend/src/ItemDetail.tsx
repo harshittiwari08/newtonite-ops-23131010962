@@ -39,7 +39,10 @@ function diffSummary(a: Activity) {
 }
 
 export default function ItemDetail({ user, users, itemId, onClose, onChanged }: Props) {
-  const [item, setItem] = useState<Detail | null>(null)
+  const [serverItem, setItem] = useState<Detail | null>(null)
+  // Optimistic overlay: shown immediately, dropped (rolled back) when the server answers.
+  const [patch, setPatch] = useState<Partial<Detail> | null>(null)
+  const item = serverItem && patch ? { ...serverItem, ...patch } : serverItem
   const [loadError, setLoadError] = useState<string | null>(null)
   const [conflict, setConflict] = useState<Conflict | null>(null)
   const [notice, setNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
@@ -101,18 +104,21 @@ export default function ItemDetail({ user, users, itemId, onClose, onChanged }: 
   }
 
   /** Shared handling for mutating calls: 409 -> conflict banner, other errors -> notice. */
-  async function mutate(path: string, method: string, body: unknown, okText: string) {
+  async function mutate(path: string, method: string, body: unknown, okText: string, optimistic?: Partial<Detail>) {
+    if (optimistic) setPatch(optimistic)
     const r = await call<any>(`/items/${itemId}${path}`, { method, body, userId: user.id })
+    setPatch(null) // success: load() below brings the real data; failure: this is the rollback
     if (r.ok) {
       setConflict(null)
       setNotice({ kind: 'ok', text: okText })
       await load()
       onChanged()
     } else if (r.status === 409) {
-      setConflict({ message: r.data.error, current: r.data.currentItem })
+      setConflict({ message: optimistic ? `Rolled back. ${r.data.error}` : r.data.error, current: r.data.currentItem })
       onChanged()
     } else {
-      setNotice({ kind: 'err', text: `${r.status}: ${r.data?.error ?? 'Request failed'}` })
+      const rolledBack = optimistic ? 'Rolled back. ' : ''
+      setNotice({ kind: 'err', text: `${rolledBack}${r.status}: ${r.data?.error ?? 'Request failed'}` })
     }
     return r
   }
@@ -240,6 +246,7 @@ export default function ItemDetail({ user, users, itemId, onClose, onChanged }: 
 
       <div className="meta">
         <span className={`pill s-${item.status}`}>{item.status}</span>
+        {patch && <span className="pill">saving...</span>}
         <span className={`pill p-${item.priority}`}>{item.priority}</span>
         <span className="pill">{item.type}</span>
         <span className="pill">{item.team?.name}</span>
@@ -266,7 +273,13 @@ export default function ItemDetail({ user, users, itemId, onClose, onChanged }: 
             <button
               className="primary"
               disabled={!!item.assigneeId}
-              onClick={() => mutate('/claim', 'POST', undefined, 'Claimed.')}
+              onClick={() =>
+                mutate('/claim', 'POST', undefined, 'Claimed.', {
+                  assigneeId: user.id,
+                  assignee: { id: user.id, name: user.name, email: user.email },
+                  status: item.status === 'OPEN' ? 'IN_PROGRESS' : item.status,
+                })
+              }
               title={item.assigneeId ? 'Already assigned' : 'Atomic claim'}
             >
               Claim
@@ -287,7 +300,7 @@ export default function ItemDetail({ user, users, itemId, onClose, onChanged }: 
             />
             <button
               className="primary"
-              onClick={() => mutate('/transition', 'POST', { targetStatus: target, resolutionNote: note || undefined, version: item.version }, `Moved to ${target}.`)}
+              onClick={() => mutate('/transition', 'POST', { targetStatus: target, resolutionNote: note || undefined, version: item.version }, `Moved to ${target}.`, { status: target, resolutionNote: note || item.resolutionNote })}
             >
               {item.status === 'AWAITING_APPROVAL' && target === 'RESOLVED' && isLead ? 'Approve & resolve' : 'Transition'}
             </button>

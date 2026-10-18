@@ -8,6 +8,16 @@ An internal operations work tracker (incidents, customer issues, payment investi
 
 ## Setup
 
+### Option A: one command (Docker)
+
+```bash
+docker compose up --build
+```
+
+Starts PostgreSQL, the API (applies migrations and seeds on first start) and the UI at http://localhost:5173 (API on http://localhost:4000/api). Reset everything with `docker compose down -v`.
+
+### Option B: run locally
+
 Prerequisites: Node 20+ and a PostgreSQL database (Docker or a hosted one such as Neon).
 
 ```bash
@@ -115,6 +125,8 @@ stateDiagram-v2
 | Workflow rules A-D | `ALLOWED_TRANSITIONS` and `POST /api/items/:id/transition` |
 | Idempotent create | `POST /api/items` |
 | Audit + job in one transaction | inside each route's `prisma.$transaction` |
+| Idempotent notification handler | `handleJob` in `backend/src/worker.ts` (`Notification.jobId` is unique) |
+| Optimistic claim/transition + rollback | `mutate` in `frontend/src/ItemDetail.tsx` |
 | Worker, lease, backoff | `backend/src/worker.ts` |
 | Tests | `backend/tests/api.test.ts` |
 | Conflict banner, demo buttons | `frontend/src/ItemDetail.tsx` |
@@ -169,7 +181,7 @@ The detail view returns only the newest 20 activities/comments plus totals; olde
 - Async Express 4 handlers have no global error middleware; an unexpected database error can leave a request hanging instead of returning `500`.
 - The frontend has no automated tests, and the claim route checks the item before its transaction (the atomic `WHERE assigneeId IS NULL` is what guarantees correctness).
 - **No login screen.** The UI uses an "Acting as" user switcher (the `POST /api/login` endpoint exists but the UI does not call it).
-- **No optimistic UI.** Actions wait for the server's answer, so there is nothing to roll back.
-- **Job handlers only log.** They are safe to repeat, but there is no real notification table, so "processed twice gives one notification" is not demonstrated.
-- Docker Compose starts only PostgreSQL; the API and UI run with `npm run dev`.
+- **Optimistic UI is limited to claim and status transitions.** The item updates instantly and is rolled back with the server's reason on `403/409/400`; edits and comments wait for the server.
+- **Notifications are rows, not emails.** Job handlers write a `Notification` row (unique per job, so a duplicate delivery makes no second one); there is no email/push delivery and no UI list of notifications yet.
+- The Docker setup could not be exercised in the author's final check (Docker daemon was not running); verify with a fresh clone. The UI image bakes in `VITE_API_URL=http://localhost:4000/api`, so the browser must reach the API on that address.
 - A user who holds ADMIN in any team is treated as an admin everywhere (the seeded admin is a member of all three teams).

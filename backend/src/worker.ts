@@ -22,6 +22,23 @@ async function leaseJob(job: { id: string; runAt: Date }) {
     return res.count === 1;
 }
 
+function notificationMessage(type: string, payload: any): string | null {
+    if (type === 'NOTIFY_CLAIM') return `${payload.claimedBy} claimed this item`;
+    if (type === 'NOTIFY_STATUS_TRANSITION') return `${payload.actor} moved this item from ${payload.from} to ${payload.to}`;
+    return null; // other job types (e.g. INDEX_NEW_WORK_ITEM) send nothing
+}
+
+/** Idempotent handler: Notification.jobId is unique, so a repeated run cannot create a second one. */
+async function handleJob(job: { id: string; type: string }, payload: any) {
+    const message = notificationMessage(job.type, payload);
+    if (!message) return;
+    await prisma.notification.upsert({
+        where: { jobId: job.id },
+        update: {},
+        create: { jobId: job.id, workItemId: payload.workItemId, message },
+    });
+}
+
 export async function processPendingJobs() {
     const pendingJobs = await prisma.job.findMany({
         where: { status: 'PENDING', runAt: { lte: new Date() } },
@@ -40,6 +57,7 @@ export async function processPendingJobs() {
                 throw new Error('Simulated transient webhook/notification timeout');
             }
 
+            await handleJob(job, payload);
             console.log(`[ASYNC WORKER] Processed job ${job.id} (${job.type}):`, payload);
 
             await prisma.job.update({

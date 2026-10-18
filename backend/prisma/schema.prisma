@@ -143,3 +143,14 @@ model Job {
   runAt       DateTime @default(now())
   createdAt   DateTime @default(now())
 }
+// Result of a notification job. jobId is unique so processing the same job twice
+// still produces exactly one notification.
+model Notification {
+  id         String   @id @default(uuid())
+  jobId      String   @unique
+  workItemId String
+  message    String
+  createdAt  DateTime @default(now())
+
+  @@index([workItemId])
+}

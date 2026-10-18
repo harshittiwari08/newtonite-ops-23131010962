@@ -1,5 +1,6 @@
-version: '3.8'
-
+# One command for reviewers: docker compose up --build
+#   UI  -> http://localhost:5173
+#   API -> http://localhost:4000/api
 services:
   postgres:
     image: postgres:16-alpine
@@ -13,6 +14,29 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d newtonite_ops"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql://postgres:password123@postgres:5432/newtonite_ops
+      PORT: 4000
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "4000:4000"
+
+  web:
+    build: ./frontend
+    depends_on:
+      - api
+    ports:
+      - "5173:80"
 
 volumes:
   pgdata:

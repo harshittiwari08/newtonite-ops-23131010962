@@ -156,6 +156,16 @@ describe('history pagination', () => {
     });
 });
 
+// Each worker pass handles at most 10 jobs, so an old backlog can delay ours: keep passing until it ran once.
+async function runUntilAttempted(jobId: string, workers = 1, minAttempts = 1) {
+    for (let i = 0; i < 100; i++) {
+        await Promise.all(Array.from({ length: workers }, () => processPendingJobs()));
+        const j = await prisma.job.findUnique({ where: { id: jobId } });
+        if (j!.attempts >= minAttempts) return j!;
+    }
+    throw new Error('job was never attempted');
+}
+
 describe('background jobs', () => {
     it('uses exponential backoff', () => {
         expect([1, 2, 3].map(backoffMs)).toEqual([5000, 10000, 20000]);
@@ -163,7 +173,7 @@ describe('background jobs', () => {
 
     it('processes a job once even when workers overlap', async () => {
         const job = await prisma.job.create({ data: { type: 'TEST_OVERLAP', payload: '{}' } });
-        await Promise.all([processPendingJobs(), processPendingJobs(), processPendingJobs()]);
+        await runUntilAttempted(job.id, 3);
         const done = await prisma.job.findUnique({ where: { id: job.id } });
         expect(done!.status).toBe('COMPLETED');
         expect(done!.attempts).toBe(1);
@@ -175,8 +185,7 @@ describe('background jobs', () => {
         });
         let current = job;
         for (let i = 0; i < 6 && current.status !== 'COMPLETED'; i++) {
-            await processPendingJobs();
-            current = (await prisma.job.findUnique({ where: { id: job.id } }))!;
+            current = await runUntilAttempted(job.id, 1, i + 1);
             if (current.status === 'PENDING') {
                 expect(current.runAt.getTime()).toBeGreaterThan(Date.now()); // backed off / leased
                 await prisma.job.update({ where: { id: job.id }, data: { runAt: new Date(Date.now() - 1000) } });
@@ -195,5 +204,20 @@ describe('awaiting my approval', () => {
         expect(stats.body.awaitingApproval).toBe(0);
         const alice = await request(app).get('/api/items?view=awaiting_approval').set(as(users.alice));
         expect(alice.body.items.every((i: any) => i.teamId === engTeamId)).toBe(true);
+    });
+});
+
+describe('idempotent job handler', () => {
+    it('creates one notification even if the same job runs twice', async () => {
+        const job = await prisma.job.create({
+            data: { type: 'NOTIFY_CLAIM', payload: JSON.stringify({ workItemId: 'w-1', claimedBy: 'test@x.com' }) },
+        });
+        await processPendingJobs();
+        // Simulate a duplicate delivery (e.g. worker crashed after the side effect, before marking done)
+        await prisma.job.update({ where: { id: job.id }, data: { status: 'PENDING', runAt: new Date(Date.now() - 1000) } });
+        await processPendingJobs();
+        const final = await prisma.job.findUnique({ where: { id: job.id } });
+        expect(final!.status).toBe('COMPLETED');
+        expect(await prisma.notification.count({ where: { jobId: job.id } })).toBe(1);
     });
 });
