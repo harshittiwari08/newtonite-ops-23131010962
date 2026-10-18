@@ -75,6 +75,50 @@ React SPA  --x-user-id header-->  Express API  -->  Prisma  -->  PostgreSQL
 - **Audit and jobs:** each mutation writes an `ActivityEvent` (before/after JSON) and, where relevant, a `Job` in the same `prisma.$transaction`, so there is no state change without its audit row.
 - **Scale:** list queries are server-side filtered, searched and paginated (max 50 per page) with indexes on `(teamId, status)`, `(assigneeId, status)`, `priority`, and `createdAt`.
 
+### Diagrams
+
+```mermaid
+flowchart LR
+  B[Browser - React] -->|HTTP + x-user-id| A[Express API]
+  A -->|Prisma transaction| D[(PostgreSQL)]
+  W[Worker - polls every 3s] -->|lease + process| D
+```
+
+```mermaid
+stateDiagram-v2
+  [*] --> OPEN
+  OPEN --> IN_PROGRESS
+  IN_PROGRESS --> OPEN
+  IN_PROGRESS --> AWAITING_APPROVAL: note required
+  IN_PROGRESS --> RESOLVED: note required; HIGH/CRITICAL/incident only if LEAD/ADMIN
+  AWAITING_APPROVAL --> RESOLVED: LEAD/ADMIN only, note required
+  AWAITING_APPROVAL --> IN_PROGRESS
+  RESOLVED --> CLOSED
+  RESOLVED --> IN_PROGRESS
+  CLOSED --> IN_PROGRESS
+```
+
+| Action | VIEWER | MEMBER | LEAD | ADMIN |
+|---|---|---|---|---|
+| View items/history of the team | yes | yes | yes | yes |
+| Create, claim, edit, comment, transition | no | yes | yes | yes |
+| Assign to someone else | no | no | yes | yes |
+| Approve `AWAITING_APPROVAL -> RESOLVED` | no | no | yes | yes |
+
+### Where to find things (code map)
+
+| Behaviour | Where |
+|---|---|
+| Roles and permission check (`hasMinRole`) | `backend/src/auth.ts` |
+| Atomic claim | `backend/src/app.ts`, route `POST /api/items/:id/claim` |
+| Version check on edit | `PATCH /api/items/:id` |
+| Workflow rules A-D | `ALLOWED_TRANSITIONS` and `POST /api/items/:id/transition` |
+| Idempotent create | `POST /api/items` |
+| Audit + job in one transaction | inside each route's `prisma.$transaction` |
+| Worker, lease, backoff | `backend/src/worker.ts` |
+| Tests | `backend/tests/api.test.ts` |
+| Conflict banner, demo buttons | `frontend/src/ItemDetail.tsx` |
+
 ### API summary
 
 | Method | Path | Notes |
@@ -124,4 +168,8 @@ The detail view returns only the newest 20 activities/comments plus totals; olde
 - **Stale views** are detected by an 8-second poll of the open item (banner, no overwrite of in-progress edits), not by push (SSE/WebSocket). The UI is pessimistic: it waits for the server's decision rather than updating optimistically.
 - Async Express 4 handlers have no global error middleware; an unexpected database error can leave a request hanging instead of returning `500`.
 - The frontend has no automated tests, and the claim route checks the item before its transaction (the atomic `WHERE assigneeId IS NULL` is what guarantees correctness).
+- **No login screen.** The UI uses an "Acting as" user switcher (the `POST /api/login` endpoint exists but the UI does not call it).
+- **No optimistic UI.** Actions wait for the server's answer, so there is nothing to roll back.
+- **Job handlers only log.** They are safe to repeat, but there is no real notification table, so "processed twice gives one notification" is not demonstrated.
+- Docker Compose starts only PostgreSQL; the API and UI run with `npm run dev`.
 - A user who holds ADMIN in any team is treated as an admin everywhere (the seeded admin is a member of all three teams).

@@ -186,3 +186,14 @@ describe('background jobs', () => {
         expect(current.attempts).toBe(3);
     });
 });
+
+describe('awaiting my approval', () => {
+    it('only shows the approval queue to people who can approve', async () => {
+        const bob = await request(app).get('/api/items?view=awaiting_approval').set(as(users.bob));
+        expect(bob.body.pagination.total).toBe(0);
+        const stats = await request(app).get('/api/stats').set(as(users.bob));
+        expect(stats.body.awaitingApproval).toBe(0);
+        const alice = await request(app).get('/api/items?view=awaiting_approval').set(as(users.alice));
+        expect(alice.body.items.every((i: any) => i.teamId === engTeamId)).toBe(true);
+    });
+});

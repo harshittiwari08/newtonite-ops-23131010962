@@ -2,7 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { Priority, Role, WorkItemStatus, WorkItemType } from '@prisma/client';
-import { prisma, requireAuth, getRoleInTeam, hasMinRole } from './auth';
+import { prisma, requireAuth, getRoleInTeam, hasMinRole, AuthUser } from './auth';
 import { startBackgroundWorker, processPendingJobs } from './worker';
 
 dotenv.config();
@@ -22,6 +22,11 @@ const ALLOWED_TRANSITIONS: Record<WorkItemStatus, WorkItemStatus[]> = {
     RESOLVED: [WorkItemStatus.IN_PROGRESS, WorkItemStatus.CLOSED],
     CLOSED: [WorkItemStatus.IN_PROGRESS], // Reopen if needed
 };
+
+// Teams where the user may approve items (LEAD or ADMIN) -> "Awaiting my approval"
+function approverTeamsOf(user: AuthUser) {
+    return user.memberships.filter((m) => m.role === Role.LEAD || m.role === Role.ADMIN).map((m) => m.teamId);
+}
 
 // 1. Get all seeded demo users (for quick login/role switcher)
 app.get('/api/users', async (_req, res) => {
@@ -71,6 +76,7 @@ app.post('/api/login', async (req, res) => {
 app.get('/api/stats', requireAuth, async (req, res) => {
     const user = req.user!;
     const teamIds = user.memberships.map((m) => m.teamId);
+    const approverTeamIds = approverTeamsOf(user);
 
     const [assignedToMe, unassignedUrgent, awaitingApproval, byStatus] = await Promise.all([
         prisma.workItem.count({
@@ -90,7 +96,7 @@ app.get('/api/stats', requireAuth, async (req, res) => {
         }),
         prisma.workItem.count({
             where: {
-                teamId: { in: teamIds },
+                teamId: { in: approverTeamIds },
                 status: WorkItemStatus.AWAITING_APPROVAL,
             },
         }),
@@ -147,6 +153,7 @@ app.get('/api/items', requireAuth, async (req, res) => {
         where.status = WorkItemStatus.OPEN;
     } else if (view === 'awaiting_approval') {
         where.status = WorkItemStatus.AWAITING_APPROVAL;
+        where.teamId = { in: approverTeamsOf(user).filter((id) => !teamId || id === teamId) };
     }
 
     if (q && q.trim() !== '') {
@@ -217,32 +224,52 @@ app.get('/api/items/:id', requireAuth, async (req, res) => {
     res.json({ ...item, currentUserRole: role });
 });
 
-// 5b. Cursor-paginated history (activities / comments), newest first.
-for (const kind of ['activities', 'comments'] as const) {
-    app.get(`/api/items/:id/${kind}`, requireAuth, async (req, res) => {
-        const user = req.user!;
-        const item = await prisma.workItem.findUnique({ where: { id: req.params.id }, select: { teamId: true } });
-        if (!item) return res.status(404).json({ error: 'Work item not found.' });
-        if (!getRoleInTeam(user, item.teamId)) {
-            return res.status(403).json({ error: 'Forbidden: You do not belong to the owning team.' });
-        }
-        const limit = Math.min(100, Math.max(1, parseInt((req.query.limit as string) || '20', 10)));
-        const cursor = req.query.cursor as string | undefined;
-        const args = {
+// 5b. History pages (newest first, cursor = id of the first row of the next page)
+async function canSeeItem(req: express.Request, res: express.Response) {
+    const item = await prisma.workItem.findUnique({ where: { id: req.params.id }, select: { teamId: true } });
+    if (!item) {
+        res.status(404).json({ error: 'Work item not found.' });
+        return false;
+    }
+    if (!getRoleInTeam(req.user!, item.teamId)) {
+        res.status(403).json({ error: 'Forbidden: You do not belong to the owning team.' });
+        return false;
+    }
+    return true;
+}
+
+function pageArgs(req: express.Request) {
+    const limit = Math.min(100, Math.max(1, parseInt((req.query.limit as string) || '20', 10)));
+    const cursor = req.query.cursor as string | undefined;
+    return {
+        limit,
+        args: {
             where: { workItemId: req.params.id },
             orderBy: [{ createdAt: 'desc' as const }, { id: 'desc' as const }],
-            take: limit + 1,
-            ...(cursor ? { cursor: { id: cursor }, skip: 0 } : {}),
-        };
-        const rows: any[] =
-            kind === 'activities'
-                ? await prisma.activityEvent.findMany({ ...args, include: { actor: { select: { id: true, name: true, email: true } } } })
-                : await prisma.comment.findMany({ ...args, include: { author: { select: { id: true, name: true, email: true } } } });
-        const hasMore = rows.length > limit;
-        const page = hasMore ? rows.slice(0, limit) : rows;
-        res.json({ items: page, nextCursor: hasMore ? rows[limit].id : null });
-    });
+            take: limit + 1, // one extra row tells us whether another page exists
+            ...(cursor ? { cursor: { id: cursor } } : {}),
+        },
+    };
 }
+
+function toPage<T extends { id: string }>(rows: T[], limit: number) {
+    const hasMore = rows.length > limit;
+    return { items: rows.slice(0, limit), nextCursor: hasMore ? rows[limit].id : null };
+}
+
+const PERSON = { select: { id: true, name: true, email: true } };
+
+app.get('/api/items/:id/activities', requireAuth, async (req, res) => {
+    if (!(await canSeeItem(req, res))) return;
+    const { limit, args } = pageArgs(req);
+    res.json(toPage(await prisma.activityEvent.findMany({ ...args, include: { actor: PERSON } }), limit));
+});
+
+app.get('/api/items/:id/comments', requireAuth, async (req, res) => {
+    if (!(await canSeeItem(req, res))) return;
+    const { limit, args } = pageArgs(req);
+    res.json(toPage(await prisma.comment.findMany({ ...args, include: { author: PERSON } }), limit));
+});
 
 // 6. Create Work Item (with Idempotency-Key protection!)
 app.post('/api/items', requireAuth, async (req, res) => {
