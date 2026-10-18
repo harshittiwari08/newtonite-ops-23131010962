@@ -1,0 +1,145 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  VIEWER
+  MEMBER
+  LEAD
+  ADMIN
+}
+
+enum WorkItemType {
+  INCIDENT
+  CUSTOMER_ISSUE
+  PAYMENT_INVESTIGATION
+  COMPLIANCE_REQUEST
+  INTERNAL_TASK
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum WorkItemStatus {
+  OPEN
+  IN_PROGRESS
+  AWAITING_APPROVAL
+  RESOLVED
+  CLOSED
+}
+
+model User {
+  id            String          @id @default(uuid())
+  email         String          @unique
+  name          String
+  password      String
+  memberships   Membership[]
+  assignedItems WorkItem[]      @relation("AssignedUser")
+  createdItems  WorkItem[]      @relation("CreatedByUser")
+  activities    ActivityEvent[]
+  comments      Comment[]
+}
+
+model Team {
+  id          String       @id @default(uuid())
+  name        String       @unique
+  memberships Membership[]
+  workItems   WorkItem[]
+}
+
+model Membership {
+  id     String @id @default(uuid())
+  userId String
+  teamId String
+  role   Role   @default(MEMBER)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, teamId])
+}
+
+model WorkItem {
+  id             String         @id @default(uuid())
+  title          String
+  description    String
+  type           WorkItemType   @default(INTERNAL_TASK)
+  priority       Priority       @default(MEDIUM)
+  status         WorkItemStatus @default(OPEN)
+  resolutionNote String?
+  version        Int            @default(1)
+
+  teamId      String
+  assigneeId  String?
+  createdById String
+
+  dueDate   DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  team       Team            @relation(fields: [teamId], references: [id])
+  assignee   User?           @relation("AssignedUser", fields: [assigneeId], references: [id])
+  createdBy  User            @relation("CreatedByUser", fields: [createdById], references: [id])
+  activities ActivityEvent[]
+  comments   Comment[]
+
+  @@index([teamId, status])
+  @@index([assigneeId, status])
+  @@index([priority])
+  @@index([createdAt])
+}
+
+model ActivityEvent {
+  id         String   @id @default(uuid())
+  workItemId String
+  actorId    String
+  action     String
+  beforeJson String?
+  afterJson  String?
+  createdAt  DateTime @default(now())
+
+  workItem WorkItem @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  actor    User     @relation(fields: [actorId], references: [id])
+
+  @@index([workItemId, createdAt])
+}
+
+model Comment {
+  id         String   @id @default(uuid())
+  workItemId String
+  authorId   String
+  body       String
+  createdAt  DateTime @default(now())
+
+  workItem WorkItem @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  author   User     @relation(fields: [authorId], references: [id])
+}
+
+model IdempotencyKey {
+  key          String   @id
+  userId       String
+  responseCode Int
+  responseBody String
+  createdAt    DateTime @default(now())
+}
+
+model Job {
+  id          String   @id @default(uuid())
+  type        String
+  payload     String
+  status      String   @default("PENDING")
+  attempts    Int      @default(0)
+  maxAttempts Int      @default(3)
+  lastError   String?
+  runAt       DateTime @default(now())
+  createdAt   DateTime @default(now())
+}
