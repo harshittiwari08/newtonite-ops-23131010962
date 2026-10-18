@@ -183,5 +183,5 @@ The detail view returns only the newest 20 activities/comments plus totals; olde
 - **No login screen.** The UI uses an "Acting as" user switcher (the `POST /api/login` endpoint exists but the UI does not call it).
 - **Optimistic UI is limited to claim and status transitions.** The item updates instantly and is rolled back with the server's reason on `403/409/400`; edits and comments wait for the server.
 - **Notifications are rows, not emails.** Job handlers write a `Notification` row (unique per job, so a duplicate delivery makes no second one); there is no email/push delivery and no UI list of notifications yet.
-- The Docker setup could not be exercised in the author's final check (Docker daemon was not running); verify with a fresh clone. The UI image bakes in `VITE_API_URL=http://localhost:4000/api`, so the browser must reach the API on that address.
+- The Docker UI image bakes in `VITE_API_URL=http://localhost:4000/api`, so the browser must reach the API on that address (ports 4000, 5173 and 5432 must be free).
 - A user who holds ADMIN in any team is treated as an admin everywhere (the seeded admin is a member of all three teams).
