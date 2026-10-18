@@ -54,17 +54,15 @@ export default function ItemDetail({ user, users, itemId, onClose, onChanged }: 
   const [comment, setComment] = useState('')
   const [raceLog, setRaceLog] = useState<string | null>(null)
   const [remoteVersion, setRemoteVersion] = useState<number | null>(null)
-  // Older history is paged in on demand; `null` cursor + loaded=false means "still showing the preview".
-  const [history, setHistory] = useState<{ activities: Activity[] | null; comments: Comment[] | null }>({ activities: null, comments: null })
-  const [cursors, setCursors] = useState<{ activities: string | null; comments: string | null }>({ activities: null, comments: null })
+  // The detail response only has the newest 20 activities/comments. "Show all" swaps in a longer list.
+  const [fullHistory, setFullHistory] = useState<{ activities?: Activity[]; comments?: Comment[] }>({})
 
   const load = useCallback(async () => {
     const r = await call<Detail & { error?: string }>(`/items/${itemId}`, { userId: user.id })
     if (r.ok) {
       setItem(r.data)
       setRemoteVersion(null)
-      setHistory({ activities: null, comments: null })
-      setCursors({ activities: null, comments: null })
+      setFullHistory({})
       setLoadError(null)
       setNote(r.data.resolutionNote ?? '')
     } else {
@@ -91,16 +89,9 @@ export default function ItemDetail({ user, users, itemId, onClose, onChanged }: 
     return () => clearInterval(t)
   }, [itemId, user.id])
 
-  async function loadMore(kind: 'activities' | 'comments') {
-    const shown = history[kind] ?? item![kind]
-    const cursor = history[kind] ? cursors[kind] : null
-    const r = await call<{ items: any[]; nextCursor: string | null }>(
-      `/items/${itemId}/${kind}?limit=50${cursor ? `&cursor=${cursor}` : ''}`,
-      { userId: user.id },
-    )
-    if (!r.ok) return
-    setHistory((h) => ({ ...h, [kind]: history[kind] ? [...shown, ...r.data.items] : r.data.items }))
-    setCursors((c) => ({ ...c, [kind]: r.data.nextCursor }))
+  async function showAll(kind: 'activities' | 'comments') {
+    const r = await call<{ items: any[] }>(`/items/${itemId}/${kind}?limit=100`, { userId: user.id })
+    if (r.ok) setFullHistory((h) => ({ ...h, [kind]: r.data.items }))
   }
 
   /** Shared handling for mutating calls: 409 -> conflict banner, other errors -> notice. */
@@ -143,10 +134,10 @@ export default function ItemDetail({ user, users, itemId, onClose, onChanged }: 
   }
   if (!item) return <aside className="panel">Loading...</aside>
 
-  const activities = history.activities ?? item.activities
-  const comments = history.comments ?? item.comments
-  const moreActivities = history.activities ? cursors.activities !== null : item.activities.length < item._count.activities
-  const moreComments = history.comments ? cursors.comments !== null : item.comments.length < item._count.comments
+  const activities = fullHistory.activities ?? item.activities
+  const comments = fullHistory.comments ?? item.comments
+  const moreActivities = activities.length < item._count.activities
+  const moreComments = comments.length < item._count.comments
   const writable = canAct(item.currentUserRole)
   const isLead = item.currentUserRole === 'LEAD' || item.currentUserRole === 'ADMIN'
   const teamMembers = users.filter((u) => u.memberships.some((m) => m.teamId === item.teamId && m.role !== 'VIEWER'))
@@ -372,7 +363,7 @@ export default function ItemDetail({ user, users, itemId, onClose, onChanged }: 
             <div>{c.body}</div>
           </div>
         ))}
-        {moreComments && <button onClick={() => loadMore('comments')}>Load older comments</button>}
+        {moreComments && <button onClick={() => showAll('comments')}>Show all comments</button>}
         {writable && (
           <div className="row">
             <input placeholder="Add a comment" value={comment} onChange={(e) => setComment(e.target.value)} />
@@ -392,7 +383,7 @@ export default function ItemDetail({ user, users, itemId, onClose, onChanged }: 
             </li>
           ))}
         </ol>
-        {moreActivities && <button onClick={() => loadMore('activities')}>Load older activity</button>}
+        {moreActivities && <button onClick={() => showAll('activities')}>Show all activity</button>}
       </section>
     </aside>
   )

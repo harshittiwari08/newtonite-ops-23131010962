@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import { Priority, Role, WorkItemStatus, WorkItemType } from '@prisma/client';
 import { prisma, requireAuth, getRoleInTeam, hasMinRole, AuthUser } from './auth';
 import { startBackgroundWorker, processPendingJobs } from './worker';
+import { checkTransition } from './workflow';
 
 dotenv.config();
 
@@ -11,17 +12,12 @@ export const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Valid state machine transitions
 // Detail view only returns the newest N history rows; the rest is paged via /activities and /comments.
 const HISTORY_PREVIEW = 20;
 
-const ALLOWED_TRANSITIONS: Record<WorkItemStatus, WorkItemStatus[]> = {
-    OPEN: [WorkItemStatus.IN_PROGRESS],
-    IN_PROGRESS: [WorkItemStatus.OPEN, WorkItemStatus.AWAITING_APPROVAL, WorkItemStatus.RESOLVED],
-    AWAITING_APPROVAL: [WorkItemStatus.IN_PROGRESS, WorkItemStatus.RESOLVED],
-    RESOLVED: [WorkItemStatus.IN_PROGRESS, WorkItemStatus.CLOSED],
-    CLOSED: [WorkItemStatus.IN_PROGRESS], // Reopen if needed
-};
+// Reusable "include" fragments so queries stay short
+const PERSON = { select: { id: true, name: true, email: true } };
+const ITEM_INCLUDE = { team: true, assignee: PERSON, createdBy: PERSON };
 
 // Teams where the user may approve items (LEAD or ADMIN) -> "Awaiting my approval"
 function approverTeamsOf(user: AuthUser) {
@@ -167,11 +163,7 @@ app.get('/api/items', requireAuth, async (req, res) => {
         prisma.workItem.count({ where }),
         prisma.workItem.findMany({
             where,
-            include: {
-                team: true,
-                assignee: { select: { id: true, name: true, email: true } },
-                createdBy: { select: { id: true, name: true, email: true } },
-            },
+            include: ITEM_INCLUDE,
             orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }],
             skip: (pageNum - 1) * pageSize,
             take: pageSize,
@@ -196,15 +188,15 @@ app.get('/api/items/:id', requireAuth, async (req, res) => {
         where: { id: req.params.id },
         include: {
             team: true,
-            assignee: { select: { id: true, name: true, email: true } },
-            createdBy: { select: { id: true, name: true, email: true } },
+            assignee: PERSON,
+            createdBy: PERSON,
             activities: {
-                include: { actor: { select: { id: true, name: true, email: true } } },
+                include: { actor: PERSON },
                 orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
                 take: HISTORY_PREVIEW,
             },
             comments: {
-                include: { author: { select: { id: true, name: true, email: true } } },
+                include: { author: PERSON },
                 orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
                 take: HISTORY_PREVIEW,
             },
@@ -257,8 +249,6 @@ function toPage<T extends { id: string }>(rows: T[], limit: number) {
     return { items: rows.slice(0, limit), nextCursor: hasMore ? rows[limit].id : null };
 }
 
-const PERSON = { select: { id: true, name: true, email: true } };
-
 app.get('/api/items/:id/activities', requireAuth, async (req, res) => {
     if (!(await canSeeItem(req, res))) return;
     const { limit, args } = pageArgs(req);
@@ -309,11 +299,7 @@ app.post('/api/items', requireAuth, async (req, res) => {
                     createdById: user.id,
                     dueDate: dueDate ? new Date(dueDate) : null,
                 },
-                include: {
-                    team: true,
-                    assignee: { select: { id: true, name: true, email: true } },
-                    createdBy: { select: { id: true, name: true, email: true } },
-                },
+                include: ITEM_INCLUDE,
             });
 
             await tx.activityEvent.create({
@@ -385,11 +371,7 @@ app.post('/api/items/:id/claim', requireAuth, async (req, res) => {
     if (item.assigneeId === user.id) {
         const mine = await prisma.workItem.findUnique({
             where: { id: itemId },
-            include: {
-                team: true,
-                assignee: { select: { id: true, name: true, email: true } },
-                createdBy: { select: { id: true, name: true, email: true } },
-            },
+            include: ITEM_INCLUDE,
         });
         return res.set('X-Idempotent-Replay', 'true').json(mine);
     }
@@ -415,11 +397,7 @@ app.post('/api/items/:id/claim', requireAuth, async (req, res) => {
 
         const freshItem = await tx.workItem.findUnique({
             where: { id: itemId },
-            include: {
-                team: true,
-                assignee: { select: { id: true, name: true, email: true } },
-                createdBy: { select: { id: true, name: true, email: true } },
-            },
+            include: ITEM_INCLUDE,
         });
 
         await tx.activityEvent.create({
@@ -445,7 +423,7 @@ app.post('/api/items/:id/claim', requireAuth, async (req, res) => {
     if (!updated) {
         const latest = await prisma.workItem.findUnique({
             where: { id: itemId },
-            include: { assignee: { select: { id: true, name: true, email: true } } },
+            include: { assignee: PERSON },
         });
         return res.status(409).json({
             error: `Conflict: This item has already been claimed by ${latest?.assignee?.name || 'another user'}.`,
@@ -506,11 +484,7 @@ app.patch('/api/items/:id', requireAuth, async (req, res) => {
 
         const fresh = await tx.workItem.findUnique({
             where: { id: itemId },
-            include: {
-                team: true,
-                assignee: { select: { id: true, name: true, email: true } },
-                createdBy: { select: { id: true, name: true, email: true } },
-            },
+            include: ITEM_INCLUDE,
         });
 
         await tx.activityEvent.create({
@@ -541,10 +515,7 @@ app.patch('/api/items/:id', requireAuth, async (req, res) => {
     if (!updated) {
         const latest = await prisma.workItem.findUnique({
             where: { id: itemId },
-            include: {
-                team: true,
-                assignee: { select: { id: true, name: true, email: true } },
-            },
+            include: ITEM_INCLUDE,
         });
         return res.status(409).json({
             error: 'Stale Edit Conflict: Another user modified this item since you loaded it. Please review the latest version.',
@@ -576,48 +547,11 @@ app.post('/api/items/:id/transition', requireAuth, async (req, res) => {
         return res.status(403).json({ error: 'Forbidden: Requires MEMBER role or higher.' });
     }
 
-    // Rule A: Check state machine validity
-    const allowedNext = ALLOWED_TRANSITIONS[item.status] || [];
-    if (!allowedNext.includes(targetStatus)) {
-        return res.status(400).json({
-            error: `Invalid workflow transition: Cannot move directly from ${item.status} to ${targetStatus}.`,
-        });
-    }
-
-    // Rule B: High/Critical items or Incidents in IN_PROGRESS must go through AWAITING_APPROVAL before RESOLVED (unless user is already a LEAD)
+    // All workflow rules (valid move, approval, required note) live in workflow.ts
     const isLeadOrAdmin = hasMinRole(user, item.teamId, Role.LEAD);
-    if (
-        item.status === WorkItemStatus.IN_PROGRESS &&
-        targetStatus === WorkItemStatus.RESOLVED &&
-        (item.priority === Priority.CRITICAL || item.priority === Priority.HIGH || item.type === WorkItemType.INCIDENT) &&
-        !isLeadOrAdmin
-    ) {
-        return res.status(403).json({
-            error: 'Workflow Policy: High/Critical items and Incidents must be moved to AWAITING_APPROVAL for Lead sign-off.',
-        });
-    }
-
-    // Rule C: Approving an item out of AWAITING_APPROVAL -> RESOLVED requires LEAD or ADMIN role
-    if (
-        item.status === WorkItemStatus.AWAITING_APPROVAL &&
-        targetStatus === WorkItemStatus.RESOLVED &&
-        !isLeadOrAdmin
-    ) {
-        return res.status(403).json({
-            error: 'Forbidden: Only a Team LEAD or ADMIN can approve and resolve items in AWAITING_APPROVAL.',
-        });
-    }
-
-    // Rule D: Closing an item or requesting approval requires a resolutionNote
+    const broken = checkTransition({ item, targetStatus, newNote: resolutionNote, isLead: isLeadOrAdmin });
+    if (broken) return res.status(broken.status).json({ error: broken.error });
     const effectiveNote = resolutionNote !== undefined ? resolutionNote : item.resolutionNote;
-    if (
-        (targetStatus === WorkItemStatus.AWAITING_APPROVAL || targetStatus === WorkItemStatus.RESOLVED) &&
-        (!effectiveNote || effectiveNote.trim().length < 5)
-    ) {
-        return res.status(400).json({
-            error: 'Workflow Requirement: A resolution/investigation note (min 5 chars) is required before moving to AWAITING_APPROVAL or RESOLVED.',
-        });
-    }
 
     const updated = await prisma.$transaction(async (tx) => {
         const result = await tx.workItem.updateMany({
@@ -634,11 +568,7 @@ app.post('/api/items/:id/transition', requireAuth, async (req, res) => {
 
         const fresh = await tx.workItem.findUnique({
             where: { id: itemId },
-            include: {
-                team: true,
-                assignee: { select: { id: true, name: true, email: true } },
-                createdBy: { select: { id: true, name: true, email: true } },
-            },
+            include: ITEM_INCLUDE,
         });
 
         await tx.activityEvent.create({
@@ -704,7 +634,7 @@ app.post('/api/items/:id/comments', requireAuth, async (req, res) => {
                 authorId: user.id,
                 body: body.trim(),
             },
-            include: { author: { select: { id: true, name: true, email: true } } },
+            include: { author: PERSON },
         });
 
         await tx.activityEvent.create({

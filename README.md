@@ -122,7 +122,7 @@ stateDiagram-v2
 | Roles and permission check (`hasMinRole`) | `backend/src/auth.ts` |
 | Atomic claim | `backend/src/app.ts`, route `POST /api/items/:id/claim` |
 | Version check on edit | `PATCH /api/items/:id` |
-| Workflow rules A-D | `ALLOWED_TRANSITIONS` and `POST /api/items/:id/transition` |
+| Workflow rules A-D (pure function, easy to read) | `backend/src/workflow.ts`, used by `POST /api/items/:id/transition` |
 | Idempotent create | `POST /api/items` |
 | Audit + job in one transaction | inside each route's `prisma.$transaction` |
 | Idempotent notification handler | `handleJob` in `backend/src/worker.ts` (`Notification.jobId` is unique) |
