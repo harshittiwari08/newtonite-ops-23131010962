@@ -221,3 +221,14 @@ describe('idempotent job handler', () => {
         expect(await prisma.notification.count({ where: { jobId: job.id } })).toBe(1);
     });
 });
+
+describe('overdue view', () => {
+    it('lists only unfinished items whose due date has passed', async () => {
+        const overdue = await createItem(users.alice, { dueDate: new Date(Date.now() - 86400000).toISOString() });
+        const future = await createItem(users.alice, { dueDate: new Date(Date.now() + 86400000).toISOString() });
+        const res = await request(app).get('/api/items?view=overdue&limit=50').set(as(users.alice));
+        const ids = res.body.items.map((i: any) => i.id);
+        expect(ids).toContain(overdue.id);
+        expect(ids).not.toContain(future.id);
+    });
+});

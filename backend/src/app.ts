@@ -147,6 +147,9 @@ app.get('/api/items', requireAuth, async (req, res) => {
         where.assigneeId = null;
         where.priority = { in: [Priority.HIGH, Priority.CRITICAL] };
         where.status = WorkItemStatus.OPEN;
+    } else if (view === 'overdue') {
+        where.dueDate = { lt: new Date() };
+        where.status = { notIn: [WorkItemStatus.RESOLVED, WorkItemStatus.CLOSED] };
     } else if (view === 'awaiting_approval') {
         where.status = WorkItemStatus.AWAITING_APPROVAL;
         where.teamId = { in: approverTeamsOf(user).filter((id) => !teamId || id === teamId) };

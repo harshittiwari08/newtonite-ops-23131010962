@@ -30,12 +30,30 @@ function canAct(role: string | undefined) {
   return role === 'MEMBER' || role === 'LEAD' || role === 'ADMIN'
 }
 
-function diffSummary(a: Activity) {
+/** Plain-language "what needs to happen next" for the current state. */
+function nextStep(item: Detail): string {
+  switch (item.status) {
+    case 'OPEN':
+      return item.assigneeId ? 'Assigned but not started: move it to IN_PROGRESS.' : 'Needs an owner: someone should claim it.'
+    case 'IN_PROGRESS':
+      return 'Being worked on. Add a resolution note, then request approval (or resolve it if you are a lead / it is low risk).'
+    case 'AWAITING_APPROVAL':
+      return 'Waiting for a team lead to approve and resolve it.'
+    case 'RESOLVED':
+      return 'Resolved. Close it, or reopen it if the problem came back.'
+    default:
+      return 'Closed. No action needed.'
+  }
+}
+
+function diffSummary(a: Activity, users: User[]) {
+  // show people by name instead of their id
+  const show = (v: unknown) => users.find((u) => u.id === v)?.name ?? String(v)
   const before = parseJson(a.beforeJson) ?? {}
   const after = parseJson(a.afterJson) ?? {}
   const keys = Object.keys(after).filter((k) => k !== 'version' && JSON.stringify(before[k]) !== JSON.stringify(after[k]))
   if (keys.length === 0) return null
-  return keys.map((k) => `${k}: ${before[k] === undefined ? '-' : String(before[k])} -> ${String(after[k])}`).join('  |  ')
+  return keys.map((k) => `${k}: ${before[k] === undefined ? '-' : show(before[k])} -> ${show(after[k])}`).join('  |  ')
 }
 
 export default function ItemDetail({ user, users, itemId, onClose, onChanged }: Props) {
@@ -243,6 +261,7 @@ export default function ItemDetail({ user, users, itemId, onClose, onChanged }: 
         <span className="pill">{item.team?.name}</span>
         <span className="pill">your role: {item.currentUserRole}</span>
       </div>
+      <div className="next-step"><strong>Next:</strong> {nextStep(item)}</div>
       <p>{item.description}</p>
       <dl>
         <dt>Assignee</dt>
@@ -379,7 +398,7 @@ export default function ItemDetail({ user, users, itemId, onClose, onChanged }: 
             <li key={a.id}>
               <strong>{a.action}</strong> by {a.actor.name}{' '}
               <span className="muted small">{new Date(a.createdAt).toLocaleString()}</span>
-              {diffSummary(a) && <div className="small mono">{diffSummary(a)}</div>}
+              {diffSummary(a, users) && <div className="small mono">{diffSummary(a, users)}</div>}
             </li>
           ))}
         </ol>

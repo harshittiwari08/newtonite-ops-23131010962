@@ -9,9 +9,14 @@ const VIEWS = [
   { id: 'my_active', label: 'My active' },
   { id: 'unassigned_urgent', label: 'Unassigned urgent' },
   { id: 'awaiting_approval', label: 'Awaiting approval' },
+  { id: 'overdue', label: 'Overdue' },
 ]
 
 interface Pagination { total: number; page: number; limit: number; totalPages: number }
+
+function isOverdue(it: WorkItem) {
+  return !!it.dueDate && new Date(it.dueDate) < new Date() && it.status !== 'RESOLVED' && it.status !== 'CLOSED'
+}
 
 function useDebounced<T>(value: T, ms: number) {
   const [v, setV] = useState(value)
@@ -201,6 +206,7 @@ export default function App() {
                 <th>Status</th>
                 <th>Priority</th>
                 <th>Assignee</th>
+                <th>Due</th>
                 <th>Updated</th>
               </tr>
             </thead>
@@ -216,12 +222,13 @@ export default function App() {
                     <span className={`pill p-${it.priority}`}>{it.priority}</span>
                   </td>
                   <td>{it.assignee?.name ?? <em className="muted">unassigned</em>}</td>
+                  <td className={isOverdue(it) ? 'overdue' : ''}>{it.dueDate ? new Date(it.dueDate).toLocaleDateString() : '-'}</td>
                   <td>{new Date(it.updatedAt).toLocaleDateString()}</td>
                 </tr>
               ))}
               {items.length === 0 && !listError && (
                 <tr>
-                  <td colSpan={6} className="muted">
+                  <td colSpan={7} className="muted">
                     No items match.
                   </td>
                 </tr>

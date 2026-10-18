@@ -72,6 +72,8 @@ th { text-align: left; color: var(--muted); font-weight: 600; padding: 6px; bord
 td { padding: 7px 6px; border-bottom: 1px solid var(--border); }
 tbody tr { cursor: pointer; }
 tbody tr:hover, tr.selected { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.overdue { color: #c0392b; font-weight: 600; }
+.next-step { padding: 8px 12px; border-left: 3px solid var(--accent); background: var(--bg); margin: 8px 0; font-size: 13px; }
 .pager { margin-top: 10px; }
 
 .pill { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 10px; border: 1px solid var(--border); white-space: nowrap; }
